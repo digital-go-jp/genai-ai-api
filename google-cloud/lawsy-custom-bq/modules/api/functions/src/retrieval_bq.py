@@ -25,6 +25,7 @@ class ArticleWithSummary(BaseModel):
     law_id: str
     law_title: str
     unique_anchor: str  # 一意キー
+    anchor: str | None = None  # e-Govリンク用アンカー
     article_summary: str | None = None
     content: str | None = None  # SQLで動的に選択されたコンテンツ（summary or content）
     is_summary_only: bool = False  # 100k文字超の法令のため summary のみ返却されたフラグ
@@ -110,6 +111,7 @@ class BigQueryRetriever:
                 law_id,
                 law_title,
                 unique_anchor,
+                anchor,
                 article_summary
             FROM {self.indexing_table}
             WHERE law_num IN UNNEST(@law_nums)
@@ -170,6 +172,7 @@ class BigQueryRetriever:
                 indexing.law_id,
                 indexing.law_title,
                 indexing.unique_anchor,
+                indexing.anchor,
                 indexing.article_summary,
                 -- 10万文字を超える場合はsummary、そうでなければcontentを返す
                 IF(size.is_large_content,
@@ -216,9 +219,11 @@ class BigQueryRetriever:
                 anchor,
                 CASE
                     WHEN anchor IS NOT NULL THEN
-                        'https://laws.e-gov.go.jp/law/' || law_id || '#' || anchor
+                        'https://laws.e-gov.go.jp/law/'
+                        || SPLIT(law_id, '_')[OFFSET(0)] || '#' || anchor
                     ELSE
-                        'https://laws.e-gov.go.jp/law/' || law_id
+                        'https://laws.e-gov.go.jp/law/'
+                        || SPLIT(law_id, '_')[OFFSET(0)]
                 END AS url
             FROM {self.indexing_table}
             WHERE law_num IN UNNEST(@law_nums) AND unique_anchor IN UNNEST(@unique_anchors)
