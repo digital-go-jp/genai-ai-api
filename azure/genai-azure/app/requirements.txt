@@ -10,4 +10,4 @@ azure-identity==1.25.1
 # HTTP Client
 httpx==0.28.1
 
-azure-ai-projects==1.0.0
+azure-ai-projects==2.1.0
