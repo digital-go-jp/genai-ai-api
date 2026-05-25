@@ -334,125 +334,6 @@ def _build_references(
 
 
 _URL_IN_QUERY_PATTERN = re.compile(r"https://\S+")
-_ARTICLE_NUM_PATTERN = re.compile(r"第(\d+)条((?:の\d+)*)")
-
-_KANJI_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-
-
-def _kanji_number_to_int(text: str) -> int:
-    """漢数字文字列をintに変換する（1〜9999の範囲）。
-    例: '十' -> 10, '二十三' -> 23, '百三' -> 103, '千四十四' -> 1044
-    """
-    result = 0
-    current = 0
-    for ch in text:
-        if ch in _KANJI_DIGITS:
-            current = _KANJI_DIGITS[ch]
-        elif ch == "千":
-            result += (current or 1) * 1000
-            current = 0
-        elif ch == "百":
-            result += (current or 1) * 100
-            current = 0
-        elif ch == "十":
-            result += (current or 1) * 10
-            current = 0
-    result += current
-    return result
-
-
-_KANJI_ARTICLE_PATTERN = re.compile(
-    r"第([一二三四五六七八九十百千]+)条((?:の[一二三四五六七八九十百千]+)*)"
-)
-
-_FULLWIDTH_TO_HALFWIDTH = str.maketrans("０１２３４５６７８９", "0123456789")
-
-
-def _normalize_article_numbers(query: str) -> str:
-    """クエリ中の全角数字・漢数字による条番号表記をアラビア数字(半角)に正規化する。
-    '第１０条の２' -> '第10条の2', '第十条の十' -> '第10条の10',
-    '第二十三条' -> '第23条'
-    注: 「第」省略パターン（千四十四条 等）は AI ベース解決に委ねるため対象外。
-    """
-    query = query.translate(_FULLWIDTH_TO_HALFWIDTH)
-
-    def _replace_kanji(m):
-        base = str(_kanji_number_to_int(m.group(1)))
-        branch = m.group(2)
-        if branch:
-            parts = re.findall(r"の([一二三四五六七八九十百千]+)", branch)
-            branch = "".join(f"の{_kanji_number_to_int(p)}" for p in parts)
-        return f"第{base}条{branch}"
-
-    query = _KANJI_ARTICLE_PATTERN.sub(_replace_kanji, query)
-
-    return query
-
-
-def _article_match_to_anchor_suffix(match: tuple[str, str]) -> str:
-    """正規表現マッチ結果をunique_anchor末尾形式に変換する。
-    ('10', 'の10') -> '10_10', ('10', 'の11の2') -> '10_11_2', ('10', '') -> '10'
-    """
-    base, branch = match
-    if branch:
-        branch_nums = re.findall(r"\d+", branch)
-        return "_".join([base, *branch_nums])
-    return base
-
-
-def _article_match_to_display(match: tuple[str, str]) -> str:
-    """正規表現マッチ結果を表示用の条番号に変換する。
-    ('10', 'の10') -> '第10条の10'
-    """
-    base, branch = match
-    return f"第{base}条{branch}"
-
-
-def _build_mentioned_articles_prefix(query: str, articles: list) -> str:
-    """クエリで言及された条文番号に対応する条文を抽出し、参考情報の先頭に埋め込むプレフィックスを生成する"""
-    query = _normalize_article_numbers(query)
-    mentioned_matches = _ARTICLE_NUM_PATTERN.findall(query)
-    if not mentioned_matches:
-        return ""
-
-    matched = []
-    for match in mentioned_matches:
-        suffix = _article_match_to_anchor_suffix(match)
-        pattern = re.compile(rf"Article_{suffix}$")
-        for article in articles:
-            if hasattr(article, "unique_anchor") and pattern.search(article.unique_anchor):
-                matched.append((match, article))
-                break
-
-    if not matched:
-        return ""
-
-    has_paragraph_or_item = re.search(r"第\d+条[^。]*?(?:第\d+項|第\d+号)", query)
-
-    lines = [
-        "【クエリで指定された条文の照合情報 - 回答前に必ず確認すること】",
-        "クエリに以下の条文番号が含まれています。この情報と照合した上で、前提が誤っている場合は冒頭で訂正してください。",
-        "",
-    ]
-    for match, article in matched:
-        display = _article_match_to_display(match)
-        summary = getattr(article, "article_summary", None) or ""
-        lines.append(f"■ {display}の正式タイトル: {summary}")
-
-    if has_paragraph_or_item:
-        lines.append("")
-        lines.append(
-            "※ 本システムは条単位で条文を保持しているため、"
-            "指定された項・号を含む条全体を参照しています。"
-        )
-
-    lines += ["", "---", ""]
-
-    logger.info(
-        f"Mentioned article prefix built for articles: "
-        f"{[_article_match_to_display(m[0]) for m in matched]}"
-    )
-    return "\n".join(lines)
 
 
 _QUERY_LAW_NAME_PATTERN = re.compile(r"[一-龥ァ-ヴー]+(?:法律|法|規則|政令|条例|省令)")
@@ -609,34 +490,27 @@ def _fetch_summary_only_full_content(articles: list, bq_retriever) -> list:
         return []
 
 
-def _fetch_mentioned_articles_full_content(query: str, articles: list, bq_retriever) -> list:
-    """クエリで言及された条文番号の全文を BQ から直接取得する（100k文字制限を迂回）"""
-    query = _normalize_article_numbers(query)
-    mentioned_matches = _ARTICLE_NUM_PATTERN.findall(query)
-    if not mentioned_matches:
+def _fetch_mentioned_articles_full_content_by_anchors(
+    resolved_anchors: set[str], articles: list, bq_retriever
+) -> list:
+    """resolved_anchors に対応する条文の全文を BQ から直接取得する。"""
+    if not resolved_anchors:
         return []
 
     law_nums = list({a.law_num for a in articles if a.law_num})
     if not law_nums:
         return []
 
-    unique_anchors = []
-    for m in mentioned_matches:
-        suffix = _article_match_to_anchor_suffix(m)
-        anchor_pattern = re.compile(rf"Article_{suffix}$")
-        resolved = None
-        for article in articles:
-            if hasattr(article, "unique_anchor") and anchor_pattern.search(article.unique_anchor):
-                resolved = article.unique_anchor
-                break
-        unique_anchors.append(resolved or f"Main_Article_{suffix}")
+    unique_anchors = list(resolved_anchors)
 
     try:
         full_articles = bq_retriever.get_full_articles(law_nums, unique_anchors)
-        logger.info(f"Fetched {len(full_articles)} full articles for mentioned: {unique_anchors}")
+        logger.info(
+            f"Fetched {len(full_articles)} full articles by anchors: {unique_anchors}"
+        )
         return full_articles
     except Exception as e:
-        logger.error(f"Failed to fetch mentioned articles full content: {e}")
+        logger.error(f"Failed to fetch mentioned articles by anchors: {e}")
         return []
 
 
@@ -801,9 +675,7 @@ def generate_law_report(
     # 推定法令名とBQ取得法令名の乖離チェック（架空法令の誤マッピング検出）
     law_name_divergence_warning = _check_law_name_divergence(law_names, articles)
 
-    articles = _select_articles(query, articles, genai_client, app_config, usage_tracker)
-
-    # AI ベースの条文番号解決（Phase 2）
+    # AI ベースの条文番号解決（Phase 2） - AI選択前に実行してanchor確保
     if ai_mentioned_articles:
         resolved_anchors, resolved_pairs = article_resolver.resolve_to_anchors(
             ai_mentioned_articles, articles
@@ -811,14 +683,33 @@ def generate_law_report(
         mentioned_prefix = article_resolver.build_prefix_from_resolved(resolved_pairs, query)
     else:
         resolved_anchors = set()
-        mentioned_prefix = _build_mentioned_articles_prefix(query, articles)
+        resolved_pairs = []
+        mentioned_prefix = ""
+
+    articles = _select_articles(query, articles, genai_client, app_config, usage_tracker)
+
+    # AI選択結果に、ユーザー指定条文が含まれていなければ追加する
+    if resolved_anchors:
+        selected_anchors = {a.unique_anchor for a in articles}
+        missing = [
+            article
+            for _, article in resolved_pairs
+            if article.unique_anchor not in selected_anchors
+        ]
+        if missing:
+            articles = missing + articles
+            logger.info(
+                f"Added {len(missing)} user-specified articles missing from AI selection"
+            )
 
     final_articles = _to_full_articles(articles)
     if not final_articles:
         return "該当する条文が見つかりませんでした。", []
 
     # 言及条文の全文を BQ から直接取得してマージ（100k文字制限を迂回）
-    mentioned_full = _fetch_mentioned_articles_full_content(query, articles, bq_retriever)
+    mentioned_full = _fetch_mentioned_articles_full_content_by_anchors(
+        resolved_anchors, articles, bq_retriever
+    )
     mentioned_anchors: set[str] = resolved_anchors
     if mentioned_full:
         # 既存の same unique_anchor をサマリー版から全文版に差し替え、先頭に配置
