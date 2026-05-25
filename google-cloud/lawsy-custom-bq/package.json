@@ -1,6 +1,6 @@
 {
   "name": "lawsy-custom-bq",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Serverless API for Google Cloud Gemini",
   "private": true
 }
