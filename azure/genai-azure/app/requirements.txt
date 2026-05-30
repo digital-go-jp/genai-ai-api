@@ -1,5 +1,5 @@
 # Azure Functions
-azure-functions>=1.18.0
+azure-functions>=2.1.0
 
 # Azure OpenAI
 openai==2.7.1
