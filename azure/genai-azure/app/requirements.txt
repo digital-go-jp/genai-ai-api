@@ -2,7 +2,7 @@
 azure-functions>=1.18.0
 
 # Azure OpenAI
-openai==2.7.1
+openai==2.44.0
 
 # Azure Identity (Managed Identity認証用)
 azure-identity==1.25.1
